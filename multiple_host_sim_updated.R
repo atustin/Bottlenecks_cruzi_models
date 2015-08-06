@@ -7,15 +7,18 @@
 # compared to houses that contain only humans and dogs.
 # 3) Code can now model guinea pig bottlenecks (which represent events such
 # as mass kill-offs for national feasts) and vector bottlenecks (representing
-# a pesticide spraying event). User can vary the bottleneck duration and the
-# number of hosts/vectors that return after a bottleneck.
+# a pesticide spraying event). User can set the number of hosts/vectors
+# that return after a bottleneck.
+# 4) Reinfestation by vectors is now a stochastic process. The user sets the
+# weekly probability of reinfestation. Once the bug bottleneck starts,
+# the reinfestation week will be randomly chosen assuming a binomial
+# probability distribution.
 
 # Remaining TO DO items:
 # - Consider adding congenital transmission in hosts
 
 # Store the path to this source code:
 inFolder <- getwd()
-#inFolder <- "~/Dropbox/Aaron_work/cuy_migration/models/"
 
 # Function to set the important parameters as global variables.
 initialize <- function(cuyStartPopulationIn = 10, # initial guinea pig population
@@ -31,6 +34,7 @@ initialize <- function(cuyStartPopulationIn = 10, # initial guinea pig populatio
                        BtoHInfectProbIn = 0.00058, # prob of infecting a human w/ one bite
                        cuyLifetimeIn = 17, # weeks a gp lives, on average (4 mo)
                        dogLifetimeIn = 260, # 5 years (260 weeks)
+                       DtoBInfectProbIn = 0.487, # prob dog infects bug; from Gurtler 1996
                        bugLifetimeIn = 28, # weeks
                        humanLifetimeIn = 2600, # 50 years
                        probSuperCuyIn = 0.33, # prob that each gp is a superspreader
@@ -41,6 +45,7 @@ initialize <- function(cuyStartPopulationIn = 10, # initial guinea pig populatio
                        cuyBottleStartTimeIn = 20,
                        cuyBottlePopSizeIn = 2,
                        cuyBottleEndTimeIn = 40,
+                       cuyBottleRepeatInterval = -1, # number of weeks between repetitions of cuy bottleneck. If -1, then there is only one bottleneck.
                        cuyToReintroduceIn = 8,
                        infectedCuyToReintroduceIn = 0,
                        # The following inputs control the vector population dynamics
@@ -48,10 +53,11 @@ initialize <- function(cuyStartPopulationIn = 10, # initial guinea pig populatio
                        vectorPopCuyMultiplier = 100, # factor by which bug population increases when gp are present
                        
                        bugBottleStartTimeIn = 30, # set to -1 for no bottleneck
-                       bugBottlePopSizeIn = 0,
-                       bugBottleEndTimeIn = 40,
-                       newBugsPerDayAfterBottle = 5, # rate by which bug population increases after bottleneck
-                       infectedBugReintroduceAfterBottle = 1 # number of new bugs that should be infected on the week after the bottleneck.
+                       bugBottlePopSizeIn = 0, # default is that all bugs are eliminated during the bug bottleneck.
+                       probBugReinfestPerWeekIn = 0.05, # weekly probability of reinfestation after bug bottleneck
+                       bugBottleRepeatInterval = -1, # number of weeks between repetitions of vector bottleneck. If -1, then there is only one bottleneck.
+                       bugFertilityIn = 0.2, # weekly number of new bugs born to each existing bug
+                       infectedBugReintroduceAfterBottle = 1 # number of newly reintroduced bugs that are infected after the bug bottleneck. This parameter should be either 0 or 1.
                        ) {
 
   # Store all inputs as global variables
@@ -66,6 +72,7 @@ initialize <- function(cuyStartPopulationIn = 10, # initial guinea pig populatio
   BtoCInfectProb <<- BtoCInfectProbIn
   BtoDInfectProb <<- BtoDInfectProbIn
   BtoHInfectProb <<- BtoHInfectProbIn
+  DtoBInfectProb <<- DtoBInfectProbIn
   cuyLifetime <<- cuyLifetimeIn
   dogLifetime <<- dogLifetimeIn
   bugLifetime <<- bugLifetimeIn
@@ -75,7 +82,8 @@ initialize <- function(cuyStartPopulationIn = 10, # initial guinea pig populatio
   dogPrefFactor <<- dogPrefFactorIn
   chickenPrefFactor <<- chickenPrefFactorIn
   humanLifetime <<- humanLifetimeIn
-
+  bugFertility <<- bugFertilityIn
+  
   # ========================================================
   # These parameters are related to guinea pig bottlenecks, to model
   # the effect of festivals where the gp population declines precipitously.
@@ -95,6 +103,8 @@ initialize <- function(cuyStartPopulationIn = 10, # initial guinea pig populatio
   # of a guinea pig bottleneck.
   cuyToReintroduce <<- cuyToReintroduceIn
   infectedCuyToReintroduce <<- infectedCuyToReintroduceIn
+
+  cuyBottleRepeatInterval <<- cuyBottleRepeatInterval
   
   # ==========================================================
   # These parameters related to bug (vector) bottlenecks. Vector bottlenecks
@@ -103,16 +113,23 @@ initialize <- function(cuyStartPopulationIn = 10, # initial guinea pig populatio
   # bugBottleStartTime is the simulation week when the bug bottleneck
   # starts. If set to -1, there is no bug bottleneck.
   bugBottleStartTime <<- bugBottleStartTimeIn
+
+  if (bugBottleStartTime < 0)
+      bugBottleEndTime <<- -1
+  
   bugBottlePopSize <<- bugBottlePopSizeIn  # size to which the vector population declines during a bottleneck.
-  bugBottleEndTime <<- bugBottleEndTimeIn  # simulation week when bug bottleneck ends.
+
+  probBugReinfestPerWeek <<- probBugReinfestPerWeekIn
+      
   vectorPopBaseline <<- vectorPopBaseline # bug population size when no cuyes are present
   vectorPopCuyMultiplier <<- vectorPopCuyMultiplier # factor by which bug population increases when gp are present
-  newBugsPerDayAfterBottle <<- newBugsPerDayAfterBottle # rate by which bug population increases after bottleneck
   infectedBugReintroduceAfterBottle <<- infectedBugReintroduceAfterBottle # number of infected bugs that should come back into the population after the bug bottleneck ends.
+  inBugBottleneck <<- FALSE # not currently in a bug bottleneck
+  bugBottleRepeatInterval <<- bugBottleRepeatInterval
   
   # Make sure the bug bottleneck inputs are reasonable:
-  if (bugBottleStartTime > 0 & bugBottleEndTime <= bugBottleStartTime)
-      stop("bugBottleEndTime must be greater than bugBottleStartTime")
+  if (infectedBugReintroduceAfterBottle != 0 & infectedBugReintroduceAfterBottle != 1)
+      stop("infectedBugReintroduceAfterBottle must be 0 or 1")
   # ==========================================================
   
   # Store the integrated human infectivity over the course of the lifetime:
@@ -214,7 +231,7 @@ doSim <- function(nsims = 5,
 
       # Keep track of the current guinea pig population, because it varies...
       cuyCurrentPopulation <<- cuyStartPopulation
-    }
+  }
     else
         cuyCurrentPopulation <<- 0
     
@@ -243,8 +260,8 @@ doSim <- function(nsims = 5,
     for (week in 1:simLength) {
 
         # Adjust the guinea pig population size if this is the first
-        # week of the guinea pig bottleneck
-        if (doCuyBottleneck & week == cuyBottleStartTime) {
+        # week of a guinea pig bottleneck
+        if (doCuyBottleneck & isCuyBottleStart(week)) {
             # Reduce the current guinea pig population size:
             cuyCurrentPopulation <<- cuyBottlePopSize
             # Randomly determine which guinea pigs to keep:
@@ -258,7 +275,7 @@ doSim <- function(nsims = 5,
 
         # Adjust the guinea pig population if we've reached the
         # end of the guinea pig bottleneck.
-        if (doCuyBottleneck & week == cuyBottleEndTime) {
+        if (doCuyBottleneck & isCuyBottleEnd(week)) {
             cuyCurrentPopulation <<- cuyCurrentPopulation + cuyToReintroduce
             # Make all the new cuyes born this week and set death week
             # randomly:
@@ -268,52 +285,104 @@ doSim <- function(nsims = 5,
             cI <- c(cI, rep(1, infectedCuyToReintroduce), rep(0, (cuyToReintroduce - infectedCuyToReintroduce)))
             cID <- c(cID, rep(week, infectedCuyToReintroduce), rep(0, (cuyToReintroduce - infectedCuyToReintroduce)))
             cSuper <- c(cSuper, runif(cuyToReintroduce) < probSuperCuy)
-        }  
+        }
 
-        # Calculate the current vector population size:
-        if (bugBottleStartTime > 0 & week >= bugBottleStartTime & week < bugBottleEndTime) {
-            # we're within a vector bottleneck.
-            currentVectorPop <- bugBottlePopSize
+        if (isBugBottleStart(week)) {
+            # We've reached the start of a bug bottleneck. Calculate the
+            # time when it will end (i.e., when the
+            # first reinfested bug will appear) based on the weekly probability
+            # of reinfestation:
+            bugBottleEndTime <<- getBugBottleEndWeek(week, probBugReinfestPerWeek)
+            inBugBottleneck <<- TRUE
+        }
+        
+        # Calculate the current maximum desired vector population size:
+        if (inBugBottleneck) {
+            if (week < bugBottleEndTime) {
+                # we're still within a vector bottleneck.
+                maxVectorPop <- bugBottlePopSize
+            }
+            else  {
+                # vector bottleneck has ended.
+                inBugBottleneck <<- FALSE
+                if (cuyCurrentPopulation > 0)
+                    maxVectorPop <- vectorPopBaseline*vectorPopCuyMultiplier
+                else
+                    maxVectorPop <- vectorPopBaseline
+            }
         }
         else {
             # Not within a vector bottleneck
             if (cuyCurrentPopulation > 0)
-                currentVectorPop <- vectorPopBaseline*vectorPopCuyMultiplier
+                maxVectorPop <- vectorPopBaseline*vectorPopCuyMultiplier
             else
-                currentVectorPop <- vectorPopBaseline
+                maxVectorPop <- vectorPopBaseline
         }
-
-        # If the current vector population differs from the previous
+        
+        # If the current desired vector population differs from the previous
         # vector population, we must either increase or decrease the
         # number of bugs:
         if (week > 1) {
-            if (currentVectorPop > bugPopNew[sim, week-1]) {
-                # Increase the number of vectors. Let all new vectors
-                # be born this week.
-                numNewBugs <- currentVectorPop - bugPopNew[sim, week-1]
+            if (maxVectorPop > bugPopNew[sim, week-1]) {
+                # We need to increase the number of vectors.
+
+                # There are two possibilities. One possibility is that a
+                # vector bottleneck has just ended, in which case we want
+                # to reintroduce only one new vector this week. This single
+                # new vector may or may not be infected.
+                # The other possibility is that the bottleneck ended a while
+                # ago, or the vector population was previously low due to
+                # an absence of guinea pigs. In this case, the number of
+                # new bugs this week depends on the fertility of the existing
+                # bugs.
+                
+                # Find out how many new vectors to create this week, and
+                # how many of them should be infected:
+                if (week == bugBottleEndTime) {
+                    # A bug bottleneck has just ended. Introduce one
+                    # new bug.
+                    numNewBugs <- 1
+                    numNewInfected <- infectedBugReintroduceAfterBottle
+                    cat("week", week, "introducing new bug\n")
+                }
+                else {
+                    # Increase the bug population based on fertility.
+                    # None of the new bugs should be infected.
+                    numNewBugs <- getNumNewBugs(bugPopNew[sim, week-1], maxVectorPop, bugFertility)
+                    numNewInfected <- 0
+                }
+
+                currentVectorPop <<- bugPopNew[sim, week-1] + numNewBugs
+                
+                # All new vectors have a birth date of this week
                 bBD <- c(bBD, rep(week, numNewBugs))
                 bDD <- c(bDD, round(rnorm(numNewBugs, (bugLifetime + week), sdBD)))
                 bDD[which(bDD <= week)] <- (week + 1)
-                bI <- c(bI, rep(1, infectedBugReintroduceAfterBottle), rep(0, (numNewBugs - infectedBugReintroduceAfterBottle)))
-                bID <- c(bID, rep(week, infectedBugReintroduceAfterBottle), rep(0, (numNewBugs - infectedBugReintroduceAfterBottle)))
+                bI <- c(bI, rep(1, numNewInfected), rep(0, (numNewBugs - numNewInfected)))
+                bID <- c(bID, rep(week, numNewInfected), rep(0, (numNewBugs - numNewInfected)))
                 bFD <- c(bFD, rep((week-1), numNewBugs)) # assume all new bugs have just fed one week ago.
             }
-            else if (currentVectorPop < bugPopNew[sim, week-1]) {
+            else if (maxVectorPop < bugPopNew[sim, week-1]) {
                 # Decrease the number of vectors.
-                if (currentVectorPop == 0) {
+                if (maxVectorPop == 0) {
                     # Eliminate all vectors during this bug bottleneck.
                     bI <- bID <- bFD <- bBD <- bDD <- 0
+                    currentVectorPop <<- 0
                 }
                 else {
                     # The number of bugs is reduced, but not zero:
-                    bugsToKeep <- sample(bugPopNew[sim, week-1], currentVectorPop, replace=FALSE)
+                    bugsToKeep <- sample(bugPopNew[sim, week-1], maxVectorPop, replace=FALSE)
                     bI <- bI[bugsToKeep]
                     bID <- bID[bugsToKeep]
                     bFD <- bFD[bugsToKeep]
                     bBD <- bBD[bugsToKeep]
                     bDD <- bDD[bugsToKeep]
+                    currentVectorPop <<- maxVectorPop
             }
             }                
+        }
+        else {
+            currentVectorPop <<- maxVectorPop
         }
             
         # Set the probability of feeding on each host type
@@ -397,8 +466,7 @@ doSim <- function(nsims = 5,
             else if ((bI[bug] == 0) & (dI[dogToFeed] == 1)) {
               # Dog is infected and vector is uninfected.
               # Determine whether to infect the vector.
-              if (runif(1) < DtoBInfectProb(dI[dogToFeed], dID[dogToFeed],
-                                            week)) {
+              if (runif(1) < DtoBInfectProb) {
                 # Infect this bug this week:
                 bI[bug] <- 1
                 bID[bug] <- week
@@ -649,20 +717,6 @@ CtoBInfectProb <- function(cI, cID, isSuper, weekNum, cuyPersistTime) {
   }
 }
 
-# Function returns the probability that the given dog will be infectious
-# to a vector that feeds on this dog on the given week.
-DtoBInfectProb <- function(dI, dID, weekNum) {
-  
-  if (dI == 0) return(0) # this dog is not infected
-
-  # Based on Gurtler 1996, the probability that an infected dog
-  # transmits infection to an uninfected vector with a single bite is
-  # 48.7% overall. This probability doesn't seem to vary much with the
-  # age of the dog, so assume it is constant over lifetime.
-
-  return(0.487)
-}
-
 # Function returns the probability that the human will be infectious
 # to a vector feeding on this week.
 HtoBInfectProb <- function(hI, hID, weekNum) {
@@ -740,7 +794,7 @@ saveInfectivityPlots <- function(cuyPersistTime) {
   jpeg(file="dog_infectivity.jpg")
   dogInfectivity <- 1:2555 * 0
   for (week in 1:2555) {
-    dogInfectivity[week] <- DtoBInfectProb(1, 1, week)
+    dogInfectivity[week] <- DtoBInfectProb
   }
   plot(1:2555, dogInfectivity, type="l", xlab="Weeks since infection", ylab="Probability of transmitting infection to vector", main="Dogs")
   invisible(dev.off()) # close the jpg plot file
@@ -776,7 +830,7 @@ createNextGenMatrix <- function() {
 
   if (dogPopulation > 0) {
     vectorToHost <- c(vectorToHost, (1/feedInterval)*probDog*BtoDInfectProb*bugLifetime*exp(-incubation/bugLifetime))
-    hostToVector <- c(hostToVector, (1/feedInterval)*probDog*(vectorPopulation/dogPopulation)*DtoBInfectProb(1, 1, 1)*dogLifetime)
+    hostToVector <- c(hostToVector, (1/feedInterval)*probDog*(vectorPopulation/dogPopulation)*DtoBInfectProb*dogLifetime)
   }
 
   # Now create the next generation matrix:
@@ -813,6 +867,72 @@ integrateHumanInfectivity <- function() {
   return(integral)
 }
 
+# Given the start week of the bug bottleneck, and the weekly probability
+# of reinfestation, this function stochastically calculates the week when
+# the house will actually become reinfested. Assumes that the reinfestation
+# follows a binomial probability distribution.
+getBugBottleEndWeek <- function(bugBottleStart, probReinfestPerWeek) {
+
+    nweeks <- 1
+    while (rbinom(1, 1, probReinfestPerWeek)  == 0)
+        nweeks <- nweeks + 1
+
+    # nweeks is the number of weeks that it takes for reinfestation to begin.
+    return (bugBottleStart + nweeks)
+}
+
+# When the current bug population is less than the desired bug population,
+# use this function to determine how many new bugs should be born this week.
+getNumNewBugs <- function(currentBugPop, desiredBugPop, bugFertility) {
+
+    newBugs <- round(currentBugPop*bugFertility)
+    if (newBugs + currentBugPop > desiredBugPop)
+        newBugs <- desiredBugPop - currentBugPop
+    else if (newBugs < 1) newBugs <- 1
+    return(newBugs)
+}
+
+# Determine if this is the start week of a guinea pig bottleneck
+isCuyBottleStart <- function(weekNum) {
+    if (weekNum == cuyBottleStartTime)
+        return (TRUE)
+    else if (cuyBottleRepeatInterval > 0 &
+             (cuyBottleStartTime > 0) &
+             (weekNum > cuyBottleStartTime) &
+             (weekNum - cuyBottleStartTime) %% cuyBottleRepeatInterval == 0)
+        return(TRUE)
+    else
+        return(FALSE)  
+}
+
+# Determine whether this is the end week of a guinea pig bottleneck
+isCuyBottleEnd <- function(weekNum) {
+    if (weekNum == cuyBottleEndTime)
+        return (TRUE)
+    else if (cuyBottleRepeatInterval > 0 &
+             (cuyBottleStartTime > 0) &
+             (cuyBottleEndTime > 0) &
+             (weekNum > cuyBottleEndTime) &
+             (weekNum - cuyBottleEndTime) %% cuyBottleRepeatInterval == 0)
+        return(TRUE)
+    else
+        return(FALSE) 
+}
+
+# Determine if this is the start week of a bug bottleneck:
+isBugBottleStart <- function(weekNum) {
+
+    if (weekNum == bugBottleStartTime)
+        return (TRUE)
+    else if (bugBottleRepeatInterval > 0 &
+             (bugBottleStartTime > 0) &
+             (weekNum > bugBottleStartTime) &
+             (weekNum - bugBottleStartTime) %% bugBottleRepeatInterval == 0)
+        return(TRUE)
+    else
+        return(FALSE)    
+}
+
 # Commands for running on the cluster:
 #cat("Doing simulation with cuyes and vectors. Initial 1 infected cuy.\n")
 #initialize(cuyStartPopulationIn = 10, vectorPopulationIn = 1000,
@@ -836,16 +956,17 @@ initialize(cuyStartPopulationIn = 10,
            ncuyinfectedIn = 1,
            nbuginfectedIn = 0,
            cuyBottleStartTimeIn = 40,
-           cuyBottleEndTimeIn = 90,
+           cuyBottleEndTimeIn = 68,
+           cuyBottleRepeatInterval = 52,
            cuyBottlePopSizeIn = 0,
            cuyToReintroduceIn = 10,
            infectedCuyToReintroduce = 1,
-           vectorPopBaseline = 100, 
-           vectorPopCuyMultiplier = 10,
+           vectorPopBaseline = 1000, 
+           vectorPopCuyMultiplier = 1,
            bugBottleStartTimeIn = -1,
-           bugBottleEndTimeIn = 150,
+           probBugReinfestPerWeekIn = 0.05,           
            bugBottlePopSizeIn = 0,
-           newBugsPerDayAfterBottle = 5,
-           infectedBugReintroduceAfterBottle = 1
+           infectedBugReintroduceAfterBottle = 1,
+           bugBottleRepeatInterval = 100
            )
-doSim(nsims = 100, simLength = 300, makeOutput=TRUE, outdir="../output/all_hosts_1vector_1cuy/", vectorDataPrefix="vector_prev", cuyDataPrefix="cuy_prev", dogDataPrefix="dog_prev", humanDataPrefix="human_prev")
+doSim(nsims = 20, simLength = 300, makeOutput=TRUE, outdir="../output/all_hosts_1vector_1cuy/", vectorDataPrefix="vector_prev", cuyDataPrefix="cuy_prev", dogDataPrefix="dog_prev", humanDataPrefix="human_prev")
